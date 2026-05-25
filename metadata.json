@@ -1,0 +1,6 @@
+{
+  "name": "Heavy Equipment Service Dashboard",
+  "description": "Dashboard untuk pemantauan data Service Request alat berat dengan integrasi Google Sheets menggunakan Google Apps Script.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
