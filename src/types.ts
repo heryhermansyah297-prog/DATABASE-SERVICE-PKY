@@ -25,6 +25,14 @@ export interface SRRecord {
   leadJobDescription: string;
 }
 
+export interface MechanicST {
+  id: string;
+  name: string;
+  stStart: string; // YYYY-MM-DD or empty
+  stEnd: string;   // YYYY-MM-DD or empty
+  stDays: number;  // Computed weekdays (Mon-Fri) inside the start-end range
+}
+
 export interface DashboardStats {
   totalSRs: number;
   breakdownCount: number;

@@ -26,7 +26,10 @@ import {
   Calendar,
   Settings,
   AlertCircle,
-  Filter
+  Filter,
+  BarChart3,
+  TrendingUp,
+  CalendarDays
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { SRRecord, UC3Status, UnitCondition, WorkStatus } from './types';
@@ -39,6 +42,7 @@ import {
   formatDate, 
   calculateAvgAging 
 } from './utils';
+import MechanicKpiDashboard from './components/MechanicKpiDashboard';
 
 export default function App() {
   // State variables
@@ -56,6 +60,9 @@ export default function App() {
   const [filterCondition, setFilterCondition] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('');
   const [filterUC3, setFilterUC3] = useState<string>('');
+  const [filterMonth, setFilterMonth] = useState<string>('');
+  const [chartMode, setChartMode] = useState<'volume' | 'status'>('volume');
+  const [hoveredMonth, setHoveredMonth] = useState<string | null>(null);
   
   // Specific Column Filters State (19 Columns total)
   const [filterSrNumber, setFilterSrNumber] = useState<string>('');
@@ -371,6 +378,7 @@ export default function App() {
     const matchesLabour1 = !filterLabour1 || r.labour1 === filterLabour1;
     const matchesLabour2 = !filterLabour2 || r.labour2 === filterLabour2;
     const matchesLeadJobDescription = !filterLeadJobDescription || (r.leadJobDescription && r.leadJobDescription.toLowerCase().includes(filterLeadJobDescription.toLowerCase()));
+    const matchesMonth = !filterMonth || (r.srDate && r.srDate.startsWith(filterMonth));
 
     return matchesSearch && 
       matchesCustomer && 
@@ -391,14 +399,19 @@ export default function App() {
       matchesIssueDescription &&
       matchesLabour1 &&
       matchesLabour2 &&
-      matchesLeadJobDescription;
+      matchesLeadJobDescription &&
+      matchesMonth;
   });
 
   // Calculate stats dynamically based on filtered records
   const totalRecordsCount = filteredRecords.length;
-  const breakdownCount = filteredRecords.filter(r => r.unitCondition === 'Breakdown').length;
-  const runningTroubleCount = filteredRecords.filter(r => r.unitCondition === 'Running With Trouble').length;
-  const runningNormalCount = filteredRecords.filter(r => r.unitCondition === 'Running Without Trouble').length;
+
+  // Specifically for Unit Condition metrics, exclude RFU_LEAD JOB status (already completed/solved), as requested.
+  const unitConditionRecords = filteredRecords.filter(r => r.status !== 'RFU_LEAD JOB');
+  const unitConditionTotalCount = unitConditionRecords.length;
+  const breakdownCount = unitConditionRecords.filter(r => r.unitCondition === 'Breakdown').length;
+  const runningTroubleCount = unitConditionRecords.filter(r => r.unitCondition === 'Running With Trouble').length;
+  const runningNormalCount = unitConditionRecords.filter(r => r.unitCondition === 'Running Without Trouble').length;
   
   const rfuCount = filteredRecords.filter(r => r.status === 'RFU_LEAD JOB').length;
   const progressCount = filteredRecords.filter(r => r.status === 'Inprogress').length;
@@ -422,11 +435,144 @@ export default function App() {
     filterCustomer, filterLocation, filterCondition, filterStatus, filterUC3,
     filterSrNumber, filterWoNumber, filterUc3Number, filterSrDate, filterSrAging,
     filterPlanningDate, filterActionDate, filterRfuDate, filterSnUnit, filterModel,
-    filterIssueDescription, filterLabour1, filterLabour2, filterLeadJobDescription
+    filterIssueDescription, filterLabour1, filterLabour2, filterLeadJobDescription,
+    filterMonth
   ].filter(Boolean).length;
   
   // Custom design metrics
   const activeTechnicians = Array.from(new Set(records.flatMap(r => [r.labour1, r.labour2]).filter(Boolean))) as string[];
+
+  // Mapping Indonesian Month Names
+  const INDO_MONTHS: Record<string, string> = {
+    '01': 'Januari',
+    '02': 'Februari',
+    '03': 'Maret',
+    '04': 'April',
+    '05': 'Mei',
+    '06': 'Juni',
+    '07': 'Juli',
+    '08': 'Agustus',
+    '09': 'September',
+    '10': 'Oktober',
+    '11': 'November',
+    '12': 'Desember'
+  };
+
+  // Get all unique year-month keys present in records to keep timeline stable
+  const allMonths = Array.from(new Set(
+    records
+      .map(r => {
+        if (!r.srDate) return '';
+        const match = r.srDate.match(/^(\d{4})-(\d{2})/);
+        return match ? match[0] : '';
+      })
+      .filter(Boolean)
+  )).sort() as string[]; // standard sorting keeps 'YYYY-MM' chronological!
+
+  // If there are no months detected (or records is empty), provide standard early months for visual placeholder fallback
+  const fallbackMonths = ['2026-01', '2026-02', '2026-03', '2026-04', '2026-05'];
+  const monthTimelineList = allMonths.length > 0 ? allMonths : fallbackMonths;
+
+  // Generate records filtered by everything EXCEPT filterMonth so the chart bars stay visible even when filtering by month!
+  const chartFilteredRecords = records.filter(r => {
+    const matchesSearch = 
+      r.customer.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.srNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.snUnit.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.issueDescription.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.model.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      r.leadJobDescription.toLowerCase().includes(searchTerm.toLowerCase());
+
+    const matchesCustomer = !filterCustomer || r.customer === filterCustomer;
+    const matchesLocation = !filterLocation || r.location === filterLocation;
+    const matchesCondition = !filterCondition || r.unitCondition === filterCondition;
+    const matchesStatus = !filterStatus || r.status === filterStatus;
+    const matchesUC3 = !filterUC3 || r.uc3Status === filterUC3;
+    
+    // Column-specific matches
+    const matchesSrNumber = !filterSrNumber || r.srNumber.toLowerCase().includes(filterSrNumber.toLowerCase());
+    const matchesWoNumber = !filterWoNumber || (r.woNumber && r.woNumber.toLowerCase().includes(filterWoNumber.toLowerCase()));
+    const matchesUc3Number = !filterUc3Number || (r.uc3Number && r.uc3Number.toLowerCase().includes(filterUc3Number.toLowerCase()));
+    const matchesSrDate = !filterSrDate || r.srDate.includes(filterSrDate);
+    const matchesSrAging = !filterSrAging || r.srAging.toString().includes(filterSrAging);
+    const matchesPlanningDate = !filterPlanningDate || (r.planningDate && r.planningDate.includes(filterPlanningDate));
+    const matchesActionDate = !filterActionDate || (r.actionDate && r.actionDate.includes(filterActionDate));
+    const matchesRfuDate = !filterRfuDate || (r.rfuDate && r.rfuDate.includes(filterRfuDate));
+    const matchesSnUnit = !filterSnUnit || r.snUnit.toLowerCase().includes(filterSnUnit.toLowerCase());
+    const matchesModel = !filterModel || r.model === filterModel;
+    const matchesIssueDescription = !filterIssueDescription || r.issueDescription.toLowerCase().includes(filterIssueDescription.toLowerCase());
+    const matchesLabour1 = !filterLabour1 || r.labour1 === filterLabour1;
+    const matchesLabour2 = !filterLabour2 || r.labour2 === filterLabour2;
+    const matchesLeadJobDescription = !filterLeadJobDescription || (r.leadJobDescription && r.leadJobDescription.toLowerCase().includes(filterLeadJobDescription.toLowerCase()));
+
+    return matchesSearch && 
+      matchesCustomer && 
+      matchesLocation && 
+      matchesCondition && 
+      matchesStatus && 
+      matchesUC3 &&
+      matchesSrNumber &&
+      matchesWoNumber &&
+      matchesUc3Number &&
+      matchesSrDate &&
+      matchesSrAging &&
+      matchesPlanningDate &&
+      matchesActionDate &&
+      matchesRfuDate &&
+      matchesSnUnit &&
+      matchesModel &&
+      matchesIssueDescription &&
+      matchesLabour1 &&
+      matchesLabour2 &&
+      matchesLeadJobDescription;
+  });
+
+  // Calculate monthly metrics
+  const monthlyData = monthTimelineList.map(mKey => {
+    const monthRecords = chartFilteredRecords.filter(r => r.srDate && r.srDate.startsWith(mKey));
+    
+    const breakdown = monthRecords.filter(r => r.unitCondition === 'Breakdown').length;
+    const runningTrouble = monthRecords.filter(r => r.unitCondition === 'Running With Trouble').length;
+    const runningNormal = monthRecords.filter(r => r.unitCondition === 'Running Without Trouble').length;
+    
+    const rfu = monthRecords.filter(r => r.status === 'RFU_LEAD JOB').length;
+    const inprogress = monthRecords.filter(r => r.status === 'Inprogress').length;
+    const delay = monthRecords.filter(r => r.status === 'Delay Labour').length;
+    const notProgress = monthRecords.filter(r => r.status === 'Not Progress').length;
+    
+    // Construct Indonesian Label
+    const parts = mKey.split('-');
+    const year = parts[0] || '2026';
+    const monthCode = parts[1] || '01';
+    const monthName = INDO_MONTHS[monthCode] || 'Januari';
+    
+    const shortLabel = `${monthName.substring(0, 3)} ${year}`;
+    const fullLabel = `${monthName} ${year}`;
+    
+    return {
+      key: mKey,
+      shortLabel,
+      fullLabel,
+      total: monthRecords.length,
+      breakdown,
+      runningTrouble,
+      runningNormal,
+      rfu,
+      inprogress,
+      delay,
+      notProgress
+    };
+  });
+
+  // Find the peak month (highest total service request)
+  const maxMonthlyTotal = Math.max(...monthlyData.map(d => d.total), 1);
+  const peakMonthObj = monthlyData.reduce((prev, current) => (prev.total > current.total) ? prev : current, { fullLabel: 'N/A', total: 0 });
+  
+  // Calculate average completion rate: RFU percentage out of total SRs across the timeline list
+  const totalRfuInTimeline = monthlyData.reduce((sum, item) => sum + item.rfu, 0);
+  const totalInTimeline = monthlyData.reduce((sum, item) => sum + item.total, 0);
+  const totalAvgCompletionRate = totalInTimeline > 0 ? Math.round((totalRfuInTimeline / totalInTimeline) * 100) : 0;
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col selection:bg-blue-500 selection:text-white pb-12">
@@ -721,14 +867,14 @@ export default function App() {
                     Breakdown
                   </span>
                   <span className="font-mono text-slate-500 font-semibold text-right">
-                    {totalRecordsCount > 0 ? Math.round((breakdownCount / totalRecordsCount) * 100) : 0}%
+                    {unitConditionTotalCount > 0 ? Math.round((breakdownCount / unitConditionTotalCount) * 100) : 0}%
                   </span>
                 </div>
                 <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
                   <motion.div 
                     className="bg-red-600 h-full rounded-full" 
                     initial={{ width: 0 }} 
-                    animate={{ width: `${totalRecordsCount > 0 ? (breakdownCount / totalRecordsCount) * 100 : 0}%` }}
+                    animate={{ width: `${unitConditionTotalCount > 0 ? (breakdownCount / unitConditionTotalCount) * 100 : 0}%` }}
                     transition={{ duration: 1 }}
                   />
                 </div>
@@ -741,14 +887,14 @@ export default function App() {
                     Running With Trouble
                   </span>
                   <span className="font-mono text-slate-500 font-semibold text-right">
-                    {totalRecordsCount > 0 ? Math.round((runningTroubleCount / totalRecordsCount) * 100) : 0}%
+                    {unitConditionTotalCount > 0 ? Math.round((runningTroubleCount / unitConditionTotalCount) * 100) : 0}%
                   </span>
                 </div>
                 <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
                   <motion.div 
                     className="bg-amber-500 h-full rounded-full" 
                     initial={{ width: 0 }} 
-                    animate={{ width: `${totalRecordsCount > 0 ? (runningTroubleCount / totalRecordsCount) * 100 : 0}%` }}
+                    animate={{ width: `${unitConditionTotalCount > 0 ? (runningTroubleCount / unitConditionTotalCount) * 100 : 0}%` }}
                     transition={{ duration: 1 }}
                   />
                 </div>
@@ -761,23 +907,28 @@ export default function App() {
                     Running Without Trouble
                   </span>
                   <span className="font-mono text-slate-500 font-semibold text-right">
-                    {totalRecordsCount > 0 ? Math.round((runningNormalCount / totalRecordsCount) * 100) : 0}%
+                    {unitConditionTotalCount > 0 ? Math.round((runningNormalCount / unitConditionTotalCount) * 100) : 0}%
                   </span>
                 </div>
                 <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
                   <motion.div 
                     className="bg-emerald-500 h-full rounded-full" 
                     initial={{ width: 0 }} 
-                    animate={{ width: `${totalRecordsCount > 0 ? (runningNormalCount / totalRecordsCount) * 100 : 0}%` }}
+                    animate={{ width: `${unitConditionTotalCount > 0 ? (runningNormalCount / unitConditionTotalCount) * 100 : 0}%` }}
                     transition={{ duration: 1 }}
                   />
                 </div>
               </div>
             </div>
 
-            <div className="mt-5 pt-4 border-t border-slate-100 flex justify-between text-[11px] text-slate-400">
-              <span className="leading-tight">Total sample data diproses:</span>
-              <span className="font-mono font-bold text-slate-600">{totalRecordsCount} unit</span>
+            <div className="mt-5 pt-4 border-t border-slate-100 flex flex-col gap-1.5 text-[11px] text-slate-400">
+              <div className="flex justify-between">
+                <span className="leading-tight text-slate-500 font-medium">Total unit dipantau aktif:</span>
+                <span className="font-mono font-bold text-slate-650">{unitConditionTotalCount} unit</span>
+              </div>
+              <p className="text-[10px] text-slate-400 font-sans leading-normal bg-slate-50 p-2 rounded-lg border border-slate-100">
+                💡 Unit dengan status kerja <strong className="text-slate-600 font-bold">&quot;RFU LEAD JOB&quot;</strong> dikecualikan secara berkala dari persentase grafik kondisi untuk menyajikan akurasi data unit yang sedang ada kendala/proses pengerjaan.
+              </p>
             </div>
           </div>
 
@@ -924,6 +1075,282 @@ export default function App() {
           </div>
 
         </section>
+
+        {/* Monthly Trend Analytics Graph */}
+        <section className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col gap-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="bg-blue-50 text-blue-750 p-2 rounded-xl flex items-center justify-center shrink-0 border border-blue-105">
+                <BarChart3 className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-slate-900 flex flex-wrap items-center gap-2">
+                  Grafik Analitik Bulanan (Monthly Trend)
+                  {filterMonth && (
+                    <span className="text-[10px] bg-blue-100 text-blue-800 font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1 font-mono">
+                      Filter: {INDO_MONTHS[filterMonth.split('-')[1]] || filterMonth} {filterMonth.split('-')[0]}
+                    </span>
+                  )}
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">Visualisasi agregasi volume pekerjaan dan status tanggap per bulan</p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2.5">
+              {/* Reset Month Filter if active */}
+              {filterMonth && (
+                <button
+                  onClick={() => setFilterMonth('')}
+                  className="bg-red-55 hover:bg-red-100 text-red-650 border border-red-200 py-1.5 px-3 rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center gap-1"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Reset Filter Bulan
+                </button>
+              )}
+
+              {/* Mode Toggle Buttons */}
+              <div className="bg-slate-100 p-1 rounded-xl border border-slate-200 flex items-center">
+                <button
+                  onClick={() => setChartMode('volume')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer select-none ${
+                    chartMode === 'volume' 
+                      ? 'bg-white text-slate-900 shadow-xs' 
+                      : 'text-slate-500 hover:text-slate-850'
+                  }`}
+                >
+                  Volume SR Masuk
+                </button>
+                <button
+                  onClick={() => setChartMode('status')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer select-none ${
+                    chartMode === 'status' 
+                      ? 'bg-white text-slate-900 shadow-xs' 
+                      : 'text-slate-500 hover:text-slate-850'
+                  }`}
+                >
+                  Status Pekerjaan
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            
+            {/* Chart Area */}
+            <div className="lg:col-span-3 bg-slate-50/50 p-5 rounded-2xl border border-slate-100 relative min-h-[300px] flex flex-col justify-between">
+              
+              {/* Y-axis helper grids */}
+              <div className="absolute inset-y-12 left-12 right-6 flex flex-col justify-between pointer-events-none text-[9px] text-slate-350 font-mono font-medium opacity-50">
+                <div className="border-t border-slate-200 w-full pt-1"></div>
+                <div className="border-t border-slate-200 w-full pt-1"></div>
+                <div className="border-t border-slate-200 w-full pt-1"></div>
+                <div className="border-t border-slate-200 w-full pt-1"></div>
+              </div>
+
+              {/* Responsive Columns Container */}
+              <div className="flex-1 flex items-end justify-around gap-4 pt-10 pb-4 px-8 relative z-10 w-full">
+                
+                {monthlyData.map((item, index) => {
+                  const isActive = filterMonth === item.key;
+                  const percentVal = (item.total / maxMonthlyTotal) * 100;
+                  
+                  return (
+                    <div 
+                      key={index} 
+                      className="flex-1 flex flex-col items-center group cursor-pointer"
+                      onClick={() => {
+                        setFilterMonth(isActive ? '' : item.key);
+                      }}
+                      onMouseEnter={() => setHoveredMonth(item.key)}
+                      onMouseLeave={() => setHoveredMonth(null)}
+                    >
+                      <div className="w-full relative flex flex-col items-center justify-end h-44">
+                        
+                        {/* Hover Tooltip inside individual column container */}
+                        <AnimatePresence>
+                          {hoveredMonth === item.key && (
+                            <motion.div
+                              initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                              animate={{ opacity: 1, y: -8, scale: 1 }}
+                              exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                              className="absolute bottom-full z-45 w-48 bg-slate-900 text-white rounded-xl p-3 shadow-xl text-xs space-y-1.5 border border-slate-700 pointer-events-none"
+                            >
+                              <div className="font-bold border-b border-slate-700 pb-1 mb-1 text-slate-200">
+                                {item.fullLabel}
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Total SR:</span>
+                                <span className="font-bold text-sky-400 font-mono">{item.total} unit</span>
+                              </div>
+                              <div className="flex justify-between border-t border-slate-800/80 pt-1">
+                                <span className="text-emerald-400 font-semibold">• Selesai (RFU):</span>
+                                <span className="font-bold font-mono text-emerald-400">{item.rfu}</span>
+                              </div>
+                              <div className="flex justify-between font-medium">
+                                <span className="text-blue-400 font-semibold">• In Progress:</span>
+                                <span className="font-bold font-mono text-blue-400">{item.inprogress}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-amber-400 font-semibold">• Delay/Other:</span>
+                                <span className="font-bold font-mono text-amber-400">{item.delay + item.notProgress}</span>
+                              </div>
+                              <div className="text-[9px] text-slate-400 text-center border-t border-slate-850 pt-1.5 italic font-medium">
+                                Klik untuk memfilter dashboard
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+
+                        {/* Chart Bar */}
+                        <div className="w-full max-w-[50px] relative h-full flex flex-col justify-end">
+                          {chartMode === 'volume' ? (
+                            // MODE 1: Standard Volume Bar with premium styling
+                            <motion.div
+                              className={`w-full rounded-t-xl transition-all relative flex justify-center ${
+                                isActive 
+                                  ? 'bg-blue-600 shadow-md shadow-blue-500/25 ring-2 ring-blue-400 ring-offset-2' 
+                                  : 'bg-blue-400/80 group-hover:bg-blue-500'
+                              }`}
+                              initial={{ height: 0 }}
+                              animate={{ height: `${percentVal}%` }}
+                              transition={{ duration: 0.8, ease: "easeOut" }}
+                            >
+                              {item.total > 0 && (
+                                <span className="absolute -top-6 text-[10px] font-mono font-bold text-slate-600 bg-white px-1 py-0.5 rounded-sm border border-slate-100 shadow-2xs">
+                                  {item.total}
+                                </span>
+                              )}
+                            </motion.div>
+                          ) : (
+                            // MODE 2: Beautiful Stacked Status Bar
+                            <motion.div 
+                              className={`w-full h-full flex flex-col justify-end rounded-t-xl overflow-hidden ${
+                                isActive ? 'ring-2 ring-slate-800 ring-offset-2 shadow-lg' : ''
+                              }`}
+                              initial={{ opacity: 0, scaleY: 0 }}
+                              animate={{ opacity: 1, scaleY: 1 }}
+                              transition={{ duration: 0.6 }}
+                            >
+                              {item.total === 0 ? (
+                                <div className="w-full h-2 bg-slate-250 rounded-t-lg"></div>
+                              ) : (
+                                <>
+                                  {/* RFU segment */}
+                                  {item.rfu > 0 && (
+                                    <div 
+                                      className="w-full bg-emerald-500 hover:bg-emerald-600 transition-colors"
+                                      style={{ height: `${(item.rfu / item.total) * percentVal}%` }}
+                                      title={`RFU: ${item.rfu}`}
+                                    />
+                                  )}
+                                  {/* Inprogress segment */}
+                                  {item.inprogress > 0 && (
+                                    <div 
+                                      className="w-full bg-blue-500 hover:bg-blue-600 transition-colors"
+                                      style={{ height: `${(item.inprogress / item.total) * percentVal}%` }}
+                                      title={`In Progress: ${item.inprogress}`}
+                                    />
+                                  )}
+                                  {/* Delay/Other segment */}
+                                  {(item.delay + item.notProgress) > 0 && (
+                                    <div 
+                                      className="w-full bg-amber-400 hover:bg-amber-500 transition-colors"
+                                      style={{ height: `${((item.delay + item.notProgress) / item.total) * percentVal}%` }}
+                                      title={`Delay/Not Progress: ${item.delay + item.notProgress}`}
+                                    />
+                                  )}
+                                </>
+                              )}
+                            </motion.div>
+                          )}
+                        </div>
+
+                      </div>
+                      
+                      {/* X-axis Label */}
+                      <span className={`text-[10px] font-semibold mt-2.5 select-none transition-colors ${
+                        isActive ? 'text-blue-700 font-bold' : 'text-slate-405 group-hover:text-slate-600'
+                      }`}>
+                        {item.shortLabel}
+                      </span>
+                    </div>
+                  );
+                })}
+
+              </div>
+
+            </div>
+
+            {/* Insight Side Panel (1 column wide) */}
+            <div className="bg-slate-50 border border-slate-200/60 rounded-2xl p-5 flex flex-col justify-between gap-5">
+              
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <TrendingUp className="h-4.5 w-4.5 text-blue-600" />
+                  <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Ringkasan Tren</h3>
+                </div>
+
+                <div className="space-y-3">
+                  
+                  {/* Stat Card 1 */}
+                  <div className="bg-white p-3.5 rounded-xl border border-slate-150 shadow-2xs">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Puncak Aktivitas</span>
+                    <div className="mt-1 flex items-baseline gap-1.5">
+                      <span className="text-xs font-bold text-slate-900 block truncate">{peakMonthObj.fullLabel}</span>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1 font-medium font-mono">
+                      Volume: <span className="font-bold text-blue-600">{peakMonthObj.total} SR</span> Terdaftar
+                    </div>
+                  </div>
+
+                  {/* Stat Card 2 */}
+                  <div className="bg-white p-3.5 rounded-xl border border-slate-150 shadow-2xs">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Rata-rata Penyelesaian</span>
+                    <div className="mt-1 flex items-baseline gap-1.5">
+                      <span className="text-lg font-bold text-slate-900 font-mono">{totalAvgCompletionRate}%</span>
+                    </div>
+                    <div className="text-[11px] text-emerald-600 mt-1 font-semibold flex items-center gap-1">
+                      <CheckCircle2 className="h-3 w-3 inline animate-bounce" />
+                      Status pekerjaan RFU
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+
+              {/* Informative Tip */}
+              <div className="bg-blue-50/60 border border-blue-100 p-3.5 rounded-xl text-[11px] text-blue-900 leading-relaxed font-sans">
+                <div className="font-semibold flex items-center gap-1 mb-1 text-blue-850 uppercase tracking-wider text-[9px]">
+                  <Info className="h-3.5 w-3.5 text-blue-600" />
+                  Petunjuk Interaksi
+                </div>
+                Klik salah satu kolom bar di grafik untuk menyaring daftar data Service Request di bawah berdasarkan bulan tersebut. Pasang filter status untuk menyempurnakan hasil.
+              </div>
+
+            </div>
+
+          </div>
+
+          {/* Legend row with explanation */}
+          {chartMode === 'status' && (
+            <div className="flex flex-wrap gap-4 items-center pl-2 text-[11px] text-slate-400 font-medium">
+              <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">Legenda Status:</span>
+              <span className="flex items-center gap-1.5 text-slate-600">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span> Ready for Use (Selesai Kerja)
+              </span>
+              <span className="flex items-center gap-1.5 text-slate-600">
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span> In Progress (Pengerjaan)
+              </span>
+              <span className="flex items-center gap-1.5 text-slate-600">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block"></span> Delay/Not Progress (Ada Kendala)
+              </span>
+            </div>
+          )}
+
+        </section>
+
+        {/* Mechanic ST KPI and Weekdays Achievement Section */}
+        <MechanicKpiDashboard srRecords={records} />
 
         {/* Main List, Filter Panel, Search Controls, Database Table */}
         <section className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
