@@ -18,7 +18,8 @@ export const DEFAULT_MECHANIC_ST: MechanicST[] = [
   { id: 'mech-10', name: 'Indra', stStart: '', stEnd: '', stDays: 0 },
   { id: 'mech-11', name: 'Soni', stStart: '', stEnd: '', stDays: 0 },
   { id: 'mech-12', name: 'Yusuf', stStart: '', stEnd: '', stDays: 0 },
-  { id: 'mech-13', name: 'Arifin', stStart: '', stEnd: '', stDays: 0 }
+  { id: 'mech-13', name: 'Arifin', stStart: '', stEnd: '', stDays: 0 },
+  { id: 'mech-14', name: 'Ari', stStart: '', stEnd: '', stDays: 0 }
 ];
 
 /**
@@ -28,7 +29,15 @@ export function getStoredMechanicST(): MechanicST[] {
   try {
     const stored = localStorage.getItem(LOCAL_MECHANIC_ST_KEY);
     if (stored) {
-      return JSON.parse(stored);
+      const parsed = JSON.parse(stored) as MechanicST[];
+      const parsedIds = new Set(parsed.map(m => m.id));
+      const missing = DEFAULT_MECHANIC_ST.filter(m => !parsedIds.has(m.id));
+      if (missing.length > 0) {
+        const merged = [...parsed, ...missing];
+        saveStoredMechanicST(merged);
+        return merged;
+      }
+      return parsed;
     }
   } catch (error) {
     console.error('Failed to load mechanic ST from localStorage', error);

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import hyundaiLogo from './assets/images/hyundai_hx210hd_logo_1779752900019.png';
 import { 
   FileSpreadsheet, 
   Database, 
@@ -43,6 +44,82 @@ import {
   calculateAvgAging 
 } from './utils';
 import MechanicKpiDashboard from './components/MechanicKpiDashboard';
+
+interface BiWeeklyKpi {
+  periodLabel: string;
+  startDate: Date;
+  endDate: Date;
+  belumRfu: number; // SR yang belum RFU (status !== 'RFU_LEAD JOB')
+  sedangDiperbaiki: number; // Unit sedang diperbaiki (status === 'Inprogress')
+  totalSr: number;
+  actionRate: number; // (sedangDiperbaiki / belumRfu) * 100
+}
+
+const getBiWeeklyKpiData = (recordsList: SRRecord[]): BiWeeklyKpi[] => {
+  if (!recordsList || recordsList.length === 0) return [];
+
+  // Sort by srDate ascending to establish natural starting point
+  const sorted = [...recordsList]
+    .filter(r => r.srDate)
+    .sort((a, b) => new Date(a.srDate).getTime() - new Date(b.srDate).getTime());
+
+  if (sorted.length === 0) return [];
+
+  const earliestDateStr = sorted[0].srDate;
+  const earliest = new Date(earliestDateStr);
+  earliest.setHours(0, 0, 0, 0);
+
+  const intervals: { startDate: Date; endDate: Date; label: string }[] = [];
+  const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000;
+
+  let currentStart = new Date(earliest);
+
+  while (currentStart.getTime() <= Date.now()) {
+    const currentEnd = new Date(currentStart.getTime() + fourteenDaysMs - 1);
+    
+    const startStr = currentStart.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+    const endStr = currentEnd.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
+    const label = `${startStr} - ${endStr}`;
+
+    intervals.push({
+      startDate: new Date(currentStart),
+      endDate: new Date(currentEnd),
+      label
+    });
+
+    currentStart = new Date(currentStart.getTime() + fourteenDaysMs);
+    
+    // Prevent infinite loops safely
+    if (intervals.length > 50) break;
+  }
+
+  // Aggregate results for each period
+  const kpiList = intervals.map(interval => {
+    const periodRecords = recordsList.filter(r => {
+      if (!r.srDate) return false;
+      const d = new Date(r.srDate);
+      return d >= interval.startDate && d <= interval.endDate;
+    });
+
+    const totalSr = periodRecords.length;
+    const belumRfu = periodRecords.filter(r => r.status !== 'RFU_LEAD JOB').length;
+    const sedangDiperbaiki = periodRecords.filter(r => r.status === 'Inprogress').length;
+    const actionRate = belumRfu > 0 ? Math.round((sedangDiperbaiki / belumRfu) * 100) : 100;
+
+    return {
+      periodLabel: interval.label,
+      startDate: interval.startDate,
+      endDate: interval.endDate,
+      belumRfu,
+      sedangDiperbaiki,
+      totalSr,
+      actionRate
+    };
+  });
+
+  // Return latest period first
+  return kpiList.reverse();
+};
 
 export default function App() {
   // State variables
@@ -574,6 +651,139 @@ export default function App() {
   const totalInTimeline = monthlyData.reduce((sum, item) => sum + item.total, 0);
   const totalAvgCompletionRate = totalInTimeline > 0 ? Math.round((totalRfuInTimeline / totalInTimeline) * 100) : 0;
 
+  // Helper to extract response stats for a technician (mechanic)
+  const getTechResponseStats = (name: string, recordsList: SRRecord[]) => {
+    // Find all records where technician was assigned
+    const assignedRecords = recordsList.filter(r => r.labour1 === name || r.labour2 === name);
+    
+    // Filter to completed/acted-upon records where we can calculate response time
+    const evaluatedRecords = assignedRecords.filter(r => {
+      if (!r.srDate || !r.actionDate) return false;
+      const sr = new Date(r.srDate);
+      const act = new Date(r.actionDate);
+      return !isNaN(sr.getTime()) && !isNaN(act.getTime());
+    });
+
+    if (evaluatedRecords.length === 0) {
+      return {
+        name,
+        assignedCount: assignedRecords.length,
+        evaluatedCount: 0,
+        avgDays: null,
+        rating: 'N/A',
+        ratingLabel: 'Belum Ada Data Selesai',
+        colorClass: 'text-slate-450 bg-slate-100 border-slate-200',
+        barColor: 'bg-slate-200 opacity-40',
+        textColor: 'text-slate-400'
+      };
+    }
+
+    // Calculate sum of response times in days
+    const totalDays = evaluatedRecords.reduce((sum, r) => {
+      const sr = new Date(r.srDate);
+      const act = new Date(r.actionDate);
+      // Strip hours to calculate calendar date-only differences securely
+      sr.setHours(0,0,0,0);
+      act.setHours(0,0,0,0);
+      const diffTime = act.getTime() - sr.getTime();
+      const diffDays = Math.max(0, Math.round(diffTime / (1000 * 60 * 60 * 24)));
+      return sum + diffDays;
+    }, 0);
+
+    const avgDays = Math.round((totalDays / evaluatedRecords.length) * 10) / 10;
+
+    // SLA Rating & Visual classes (Smaller value is better!)
+    let rating = 'D';
+    let ratingLabel = 'Kurang Responsif (> 5 Hari)';
+    let colorClass = 'text-red-750 bg-red-50 border-red-105';
+    let barColor = 'bg-gradient-to-r from-red-500 to-rose-450';
+    let textColor = 'text-red-650';
+
+    if (avgDays <= 1.5) {
+      rating = 'A+';
+      ratingLabel = 'Sangat Cepat (≤ 1.5 Hari)';
+      colorClass = 'text-emerald-755 bg-emerald-50 border-emerald-105';
+      barColor = 'bg-gradient-to-r from-emerald-500 to-teal-450';
+      textColor = 'text-emerald-650';
+    } else if (avgDays <= 3.0) {
+      rating = 'A';
+      ratingLabel = 'Cepat (≤ 3 Hari)';
+      colorClass = 'text-teal-755 bg-teal-50 border-teal-105';
+      barColor = 'bg-gradient-to-r from-teal-500 to-cyan-455';
+      textColor = 'text-teal-650';
+    } else if (avgDays <= 5.0) {
+      rating = 'B';
+      ratingLabel = 'Sesuai Target (≤ 5 Hari)';
+      colorClass = 'text-blue-755 bg-blue-50 border-blue-105';
+      barColor = 'bg-gradient-to-r from-blue-500 to-sky-450';
+      textColor = 'text-blue-650';
+    } else if (avgDays <= 7.0) {
+      rating = 'C';
+      ratingLabel = 'Standar (≤ 7 Hari)';
+      colorClass = 'text-amber-755 bg-amber-50 border-amber-105';
+      barColor = 'bg-gradient-to-r from-amber-500 to-orange-450';
+      textColor = 'text-amber-650';
+    }
+
+    return {
+      name,
+      assignedCount: assignedRecords.length,
+      evaluatedCount: evaluatedRecords.length,
+      avgDays,
+      rating,
+      ratingLabel,
+      colorClass,
+      barColor,
+      textColor
+    };
+  };
+
+  const mechanicResponseData = activeTechnicians.map(name => getTechResponseStats(name, filteredRecords));
+  
+  // Sort: evaluable mechanics first (sorted by avgDays ascending), then non-evaluable mechanics
+  const sortedMechanicResponse = [...mechanicResponseData].sort((a, b) => {
+    if (a.avgDays === null && b.avgDays === null) return 0;
+    if (a.avgDays === null) return 1;
+    if (b.avgDays === null) return -1;
+    return a.avgDays - b.avgDays;
+  });
+
+  // Calculate site-wide summary stats:
+  const globalEvaluatedRecords = filteredRecords.filter(r => {
+    if (!r.srDate || !r.actionDate) return false;
+    const sr = new Date(r.srDate);
+    const act = new Date(r.actionDate);
+    return !isNaN(sr.getTime()) && !isNaN(act.getTime());
+  });
+
+  const globalTotalDays = globalEvaluatedRecords.reduce((sum, r) => {
+    const sr = new Date(r.srDate);
+    const act = new Date(r.actionDate);
+    sr.setHours(0,0,0,0);
+    act.setHours(0,0,0,0);
+    const diff = Math.max(0, Math.round((act.getTime() - sr.getTime()) / (1000 * 60 * 60 * 24)));
+    return sum + diff;
+  }, 0);
+
+  const globalAvgDays = globalEvaluatedRecords.length > 0 
+    ? Math.round((globalTotalDays / globalEvaluatedRecords.length) * 10) / 10
+    : null;
+
+  const onTimeRecords = globalEvaluatedRecords.filter(r => {
+    const sr = new Date(r.srDate);
+    const act = new Date(r.actionDate);
+    sr.setHours(0,0,0,0);
+    act.setHours(0,0,0,0);
+    const diff = Math.max(0, Math.round((act.getTime() - sr.getTime()) / (1000 * 60 * 60 * 24)));
+    return diff <= 3; // Target SLA <= 3 Days
+  });
+
+  const responseSlaRate = globalEvaluatedRecords.length > 0
+    ? Math.round((onTimeRecords.length / globalEvaluatedRecords.length) * 100)
+    : 0;
+
+  const fastestMechanic = sortedMechanicResponse.find(m => m.avgDays !== null);
+
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col selection:bg-blue-500 selection:text-white pb-12">
       
@@ -581,18 +791,26 @@ export default function App() {
       <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="bg-blue-600 text-white p-2.5 rounded-xl shadow-md shadow-blue-500/10 flex items-center justify-center">
-              <Activity className="h-6 w-6 animate-pulse" />
+            <div className="relative w-12 h-12 rounded-xl overflow-hidden shadow-md shadow-blue-500/10 border border-slate-200 shrink-0">
+              <img 
+                src={hyundaiLogo} 
+                alt="Hyundai HX210HD Excavator Logo" 
+                className="w-full h-full object-cover"
+                referrerPolicy="no-referrer"
+              />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+              <h1 className="text-xl font-bold tracking-tight text-slate-900 flex flex-wrap items-center gap-2">
                 Heavy Equipment Service Tracker
-                <span className="text-xs bg-blue-100 text-blue-800 font-semibold px-2 py-0.5 rounded-full">
+                <span className="text-[11px] bg-blue-50 text-blue-800 font-extrabold px-2.5 py-0.5 rounded-full border border-blue-100 font-sans tracking-wide">
+                  Uniquip Cabang Palangkaraya
+                </span>
+                <span className="text-xs bg-slate-100 text-slate-700 font-semibold px-2 py-0.5 rounded-full">
                   Dashboard V4
                 </span>
               </h1>
               <p className="text-xs text-slate-500 mt-0.5 font-mono">
-                Sistem Pemantauan Service Request Alat Berat • Kalimantan Tengah
+                Sistem Pemantauan Service Request Alat Berat • Cabang Palangkaraya, Kalimantan Tengah
               </p>
             </div>
           </div>
@@ -1076,281 +1294,6 @@ export default function App() {
 
         </section>
 
-        {/* Monthly Trend Analytics Graph */}
-        <section className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col gap-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="bg-blue-50 text-blue-750 p-2 rounded-xl flex items-center justify-center shrink-0 border border-blue-105">
-                <BarChart3 className="h-5 w-5" />
-              </div>
-              <div>
-                <h2 className="text-base font-bold text-slate-900 flex flex-wrap items-center gap-2">
-                  Grafik Analitik Bulanan (Monthly Trend)
-                  {filterMonth && (
-                    <span className="text-[10px] bg-blue-100 text-blue-800 font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1 font-mono">
-                      Filter: {INDO_MONTHS[filterMonth.split('-')[1]] || filterMonth} {filterMonth.split('-')[0]}
-                    </span>
-                  )}
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">Visualisasi agregasi volume pekerjaan dan status tanggap per bulan</p>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2.5">
-              {/* Reset Month Filter if active */}
-              {filterMonth && (
-                <button
-                  onClick={() => setFilterMonth('')}
-                  className="bg-red-55 hover:bg-red-100 text-red-650 border border-red-200 py-1.5 px-3 rounded-lg text-xs font-semibold cursor-pointer transition-all flex items-center gap-1"
-                >
-                  <X className="h-3.5 w-3.5" />
-                  Reset Filter Bulan
-                </button>
-              )}
-
-              {/* Mode Toggle Buttons */}
-              <div className="bg-slate-100 p-1 rounded-xl border border-slate-200 flex items-center">
-                <button
-                  onClick={() => setChartMode('volume')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer select-none ${
-                    chartMode === 'volume' 
-                      ? 'bg-white text-slate-900 shadow-xs' 
-                      : 'text-slate-500 hover:text-slate-850'
-                  }`}
-                >
-                  Volume SR Masuk
-                </button>
-                <button
-                  onClick={() => setChartMode('status')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer select-none ${
-                    chartMode === 'status' 
-                      ? 'bg-white text-slate-900 shadow-xs' 
-                      : 'text-slate-500 hover:text-slate-850'
-                  }`}
-                >
-                  Status Pekerjaan
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-            
-            {/* Chart Area */}
-            <div className="lg:col-span-3 bg-slate-50/50 p-5 rounded-2xl border border-slate-100 relative min-h-[300px] flex flex-col justify-between">
-              
-              {/* Y-axis helper grids */}
-              <div className="absolute inset-y-12 left-12 right-6 flex flex-col justify-between pointer-events-none text-[9px] text-slate-350 font-mono font-medium opacity-50">
-                <div className="border-t border-slate-200 w-full pt-1"></div>
-                <div className="border-t border-slate-200 w-full pt-1"></div>
-                <div className="border-t border-slate-200 w-full pt-1"></div>
-                <div className="border-t border-slate-200 w-full pt-1"></div>
-              </div>
-
-              {/* Responsive Columns Container */}
-              <div className="flex-1 flex items-end justify-around gap-4 pt-10 pb-4 px-8 relative z-10 w-full">
-                
-                {monthlyData.map((item, index) => {
-                  const isActive = filterMonth === item.key;
-                  const percentVal = (item.total / maxMonthlyTotal) * 100;
-                  
-                  return (
-                    <div 
-                      key={index} 
-                      className="flex-1 flex flex-col items-center group cursor-pointer"
-                      onClick={() => {
-                        setFilterMonth(isActive ? '' : item.key);
-                      }}
-                      onMouseEnter={() => setHoveredMonth(item.key)}
-                      onMouseLeave={() => setHoveredMonth(null)}
-                    >
-                      <div className="w-full relative flex flex-col items-center justify-end h-44">
-                        
-                        {/* Hover Tooltip inside individual column container */}
-                        <AnimatePresence>
-                          {hoveredMonth === item.key && (
-                            <motion.div
-                              initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                              animate={{ opacity: 1, y: -8, scale: 1 }}
-                              exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                              className="absolute bottom-full z-45 w-48 bg-slate-900 text-white rounded-xl p-3 shadow-xl text-xs space-y-1.5 border border-slate-700 pointer-events-none"
-                            >
-                              <div className="font-bold border-b border-slate-700 pb-1 mb-1 text-slate-200">
-                                {item.fullLabel}
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">Total SR:</span>
-                                <span className="font-bold text-sky-400 font-mono">{item.total} unit</span>
-                              </div>
-                              <div className="flex justify-between border-t border-slate-800/80 pt-1">
-                                <span className="text-emerald-400 font-semibold">• Selesai (RFU):</span>
-                                <span className="font-bold font-mono text-emerald-400">{item.rfu}</span>
-                              </div>
-                              <div className="flex justify-between font-medium">
-                                <span className="text-blue-400 font-semibold">• In Progress:</span>
-                                <span className="font-bold font-mono text-blue-400">{item.inprogress}</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-amber-400 font-semibold">• Delay/Other:</span>
-                                <span className="font-bold font-mono text-amber-400">{item.delay + item.notProgress}</span>
-                              </div>
-                              <div className="text-[9px] text-slate-400 text-center border-t border-slate-850 pt-1.5 italic font-medium">
-                                Klik untuk memfilter dashboard
-                              </div>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-
-                        {/* Chart Bar */}
-                        <div className="w-full max-w-[50px] relative h-full flex flex-col justify-end">
-                          {chartMode === 'volume' ? (
-                            // MODE 1: Standard Volume Bar with premium styling
-                            <motion.div
-                              className={`w-full rounded-t-xl transition-all relative flex justify-center ${
-                                isActive 
-                                  ? 'bg-blue-600 shadow-md shadow-blue-500/25 ring-2 ring-blue-400 ring-offset-2' 
-                                  : 'bg-blue-400/80 group-hover:bg-blue-500'
-                              }`}
-                              initial={{ height: 0 }}
-                              animate={{ height: `${percentVal}%` }}
-                              transition={{ duration: 0.8, ease: "easeOut" }}
-                            >
-                              {item.total > 0 && (
-                                <span className="absolute -top-6 text-[10px] font-mono font-bold text-slate-600 bg-white px-1 py-0.5 rounded-sm border border-slate-100 shadow-2xs">
-                                  {item.total}
-                                </span>
-                              )}
-                            </motion.div>
-                          ) : (
-                            // MODE 2: Beautiful Stacked Status Bar
-                            <motion.div 
-                              className={`w-full h-full flex flex-col justify-end rounded-t-xl overflow-hidden ${
-                                isActive ? 'ring-2 ring-slate-800 ring-offset-2 shadow-lg' : ''
-                              }`}
-                              initial={{ opacity: 0, scaleY: 0 }}
-                              animate={{ opacity: 1, scaleY: 1 }}
-                              transition={{ duration: 0.6 }}
-                            >
-                              {item.total === 0 ? (
-                                <div className="w-full h-2 bg-slate-250 rounded-t-lg"></div>
-                              ) : (
-                                <>
-                                  {/* RFU segment */}
-                                  {item.rfu > 0 && (
-                                    <div 
-                                      className="w-full bg-emerald-500 hover:bg-emerald-600 transition-colors"
-                                      style={{ height: `${(item.rfu / item.total) * percentVal}%` }}
-                                      title={`RFU: ${item.rfu}`}
-                                    />
-                                  )}
-                                  {/* Inprogress segment */}
-                                  {item.inprogress > 0 && (
-                                    <div 
-                                      className="w-full bg-blue-500 hover:bg-blue-600 transition-colors"
-                                      style={{ height: `${(item.inprogress / item.total) * percentVal}%` }}
-                                      title={`In Progress: ${item.inprogress}`}
-                                    />
-                                  )}
-                                  {/* Delay/Other segment */}
-                                  {(item.delay + item.notProgress) > 0 && (
-                                    <div 
-                                      className="w-full bg-amber-400 hover:bg-amber-500 transition-colors"
-                                      style={{ height: `${((item.delay + item.notProgress) / item.total) * percentVal}%` }}
-                                      title={`Delay/Not Progress: ${item.delay + item.notProgress}`}
-                                    />
-                                  )}
-                                </>
-                              )}
-                            </motion.div>
-                          )}
-                        </div>
-
-                      </div>
-                      
-                      {/* X-axis Label */}
-                      <span className={`text-[10px] font-semibold mt-2.5 select-none transition-colors ${
-                        isActive ? 'text-blue-700 font-bold' : 'text-slate-405 group-hover:text-slate-600'
-                      }`}>
-                        {item.shortLabel}
-                      </span>
-                    </div>
-                  );
-                })}
-
-              </div>
-
-            </div>
-
-            {/* Insight Side Panel (1 column wide) */}
-            <div className="bg-slate-50 border border-slate-200/60 rounded-2xl p-5 flex flex-col justify-between gap-5">
-              
-              <div className="space-y-4">
-                <div className="flex items-center gap-2">
-                  <TrendingUp className="h-4.5 w-4.5 text-blue-600" />
-                  <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Ringkasan Tren</h3>
-                </div>
-
-                <div className="space-y-3">
-                  
-                  {/* Stat Card 1 */}
-                  <div className="bg-white p-3.5 rounded-xl border border-slate-150 shadow-2xs">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Puncak Aktivitas</span>
-                    <div className="mt-1 flex items-baseline gap-1.5">
-                      <span className="text-xs font-bold text-slate-900 block truncate">{peakMonthObj.fullLabel}</span>
-                    </div>
-                    <div className="text-xs text-slate-500 mt-1 font-medium font-mono">
-                      Volume: <span className="font-bold text-blue-600">{peakMonthObj.total} SR</span> Terdaftar
-                    </div>
-                  </div>
-
-                  {/* Stat Card 2 */}
-                  <div className="bg-white p-3.5 rounded-xl border border-slate-150 shadow-2xs">
-                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Rata-rata Penyelesaian</span>
-                    <div className="mt-1 flex items-baseline gap-1.5">
-                      <span className="text-lg font-bold text-slate-900 font-mono">{totalAvgCompletionRate}%</span>
-                    </div>
-                    <div className="text-[11px] text-emerald-600 mt-1 font-semibold flex items-center gap-1">
-                      <CheckCircle2 className="h-3 w-3 inline animate-bounce" />
-                      Status pekerjaan RFU
-                    </div>
-                  </div>
-
-                </div>
-              </div>
-
-              {/* Informative Tip */}
-              <div className="bg-blue-50/60 border border-blue-100 p-3.5 rounded-xl text-[11px] text-blue-900 leading-relaxed font-sans">
-                <div className="font-semibold flex items-center gap-1 mb-1 text-blue-850 uppercase tracking-wider text-[9px]">
-                  <Info className="h-3.5 w-3.5 text-blue-600" />
-                  Petunjuk Interaksi
-                </div>
-                Klik salah satu kolom bar di grafik untuk menyaring daftar data Service Request di bawah berdasarkan bulan tersebut. Pasang filter status untuk menyempurnakan hasil.
-              </div>
-
-            </div>
-
-          </div>
-
-          {/* Legend row with explanation */}
-          {chartMode === 'status' && (
-            <div className="flex flex-wrap gap-4 items-center pl-2 text-[11px] text-slate-400 font-medium">
-              <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">Legenda Status:</span>
-              <span className="flex items-center gap-1.5 text-slate-600">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span> Ready for Use (Selesai Kerja)
-              </span>
-              <span className="flex items-center gap-1.5 text-slate-600">
-                <span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block"></span> In Progress (Pengerjaan)
-              </span>
-              <span className="flex items-center gap-1.5 text-slate-600">
-                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block"></span> Delay/Not Progress (Ada Kendala)
-              </span>
-            </div>
-          )}
-
-        </section>
-
-        {/* Mechanic ST KPI and Weekdays Achievement Section */}
-        <MechanicKpiDashboard srRecords={records} />
 
         {/* Main List, Filter Panel, Search Controls, Database Table */}
         <section className="bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
@@ -2005,6 +1948,168 @@ export default function App() {
 
         </section>
 
+        {/* Uniquip Bi-Weekly Complaint & Response KPI Section */}
+        <section className="bg-white p-6 rounded-2xl border border-slate-200/80 shadow-xs flex flex-col gap-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+            <div className="flex items-center gap-3">
+              <div className="bg-amber-50 text-amber-700 p-2.5 rounded-xl flex items-center justify-center shrink-0 border border-amber-100 shadow-2xs">
+                <Activity className="h-5 w-5 text-amber-600 animate-pulse" />
+              </div>
+              <div>
+                <h2 className="text-base font-bold text-slate-900 flex flex-wrap items-center gap-2 font-sans tracking-tight font-sans">
+                  KPI Responsible Time Uniquip (Siklus 2 Mingguan)
+                  <span className="text-[10px] bg-blue-50 text-blue-700 font-extrabold px-2.5 py-0.5 rounded-full border border-blue-100">
+                    Pelayanan Keluhan Unit
+                  </span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Analisis perbandingan jumlah keluhan/SR yang belum RFU dengan jumlah unit customer yang sedang aktif diperbaiki oleh tim Uniquip Cabang Palangkaraya.
+                </p>
+              </div>
+            </div>
+            <div className="text-[11px] font-mono text-slate-400 bg-slate-50 border border-slate-100 px-3 py-1.5 rounded-lg flex items-center gap-1 shrink-0">
+              <span className="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping"></span>
+              Live Tracking Uniquip
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+            
+            {/* Timeline Breakdown of 2-Week Blocks */}
+            <div className="lg:col-span-3 bg-slate-50/40 p-5 rounded-2xl border border-slate-200/60">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Histori Siklus Dua Mingguan</span>
+                <span className="text-[10px] text-slate-500 font-medium">Diurutkan dari periode terbaru</span>
+              </div>
+
+              {getBiWeeklyKpiData(records).length === 0 ? (
+                <div className="text-center py-12 text-slate-400 italic">
+                  Belum memiliki data rentang waktu yang cukup untuk perhitungan dua mingguan
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-150 max-h-[350px] overflow-y-auto pr-1 mt-2 custom-scrollbar space-y-4">
+                  {getBiWeeklyKpiData(records).map((kpi, idx) => {
+                    const hasAction = kpi.belumRfu > 0;
+                    let badgeColor = "bg-slate-100 text-slate-700 border-slate-200";
+                    let badgeText = "All Clear / Tenang";
+                    if (hasAction) {
+                      if (kpi.actionRate >= 75) {
+                        badgeColor = "bg-emerald-50 text-emerald-700 border-emerald-100";
+                        badgeText = "Sangat Responsif";
+                      } else if (kpi.actionRate >= 45) {
+                        badgeColor = "bg-blue-50 text-blue-700 border-blue-100";
+                        badgeText = "Responsif";
+                      } else {
+                        badgeColor = "bg-amber-50 text-amber-700 border-amber-150";
+                        badgeText = "Butuh Atensi Kerja";
+                      }
+                    }
+
+                    return (
+                      <div key={idx} className="pt-4 first:pt-1 group/kpi flex flex-col gap-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                          {/* Period duration label */}
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-8 h-8 rounded-lg bg-white border border-slate-250 flex items-center justify-center font-bold text-xs text-slate-600 shadow-2xs font-mono shrink-0">
+                              #{getBiWeeklyKpiData(records).length - idx}
+                            </div>
+                            <div>
+                              <span className="font-bold text-slate-800 text-xs md:text-sm block font-sans">
+                                Periode: {kpi.periodLabel}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-medium font-mono">
+                                Total {kpi.totalSr} SR Terbit
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Metric Indicators */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <div className="bg-red-55 text-red-800 px-2.5 py-1 rounded-lg border border-red-150 text-[11px] font-bold flex items-center gap-1 shadow-2xs font-mono">
+                              <span className="w-2 h-2 rounded-full bg-red-500"></span>
+                              {kpi.belumRfu} Belum RFU
+                            </div>
+                            <div className="bg-sky-50 text-sky-850 px-2.5 py-1 rounded-lg border border-sky-150 text-[11px] font-bold flex items-center gap-1 shadow-2xs font-mono">
+                              <span className="w-2 h-2 rounded-full bg-sky-500"></span>
+                              {kpi.sedangDiperbaiki} Diperbaiki
+                            </div>
+                            <div className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide border ${badgeColor}`}>
+                              {badgeText}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Progress bar visualizer */}
+                        <div className="space-y-1">
+                          <div className="flex justify-between items-center text-[10px] font-medium text-slate-500">
+                            <span className="font-sans">Rasio Pekerjaan Terlayani (Aktif Berjalan)</span>
+                            <span className="font-mono font-bold text-slate-800 bg-white border border-slate-200 px-1.5 py-0.2 rounded-md">
+                              {kpi.actionRate}%
+                            </span>
+                          </div>
+                          
+                          <div className="w-full bg-slate-200 h-2.5 rounded-full overflow-hidden relative">
+                            <motion.div
+                              className="bg-blue-600 h-full rounded-full"
+                              initial={{ width: 0 }}
+                              animate={{ width: `${kpi.actionRate}%` }}
+                              transition={{ duration: 0.6, ease: "easeOut" }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Explainer Analysis Rules */}
+            <div className="bg-slate-50 border border-slate-200/60 rounded-2xl p-5 flex flex-col justify-between gap-5">
+              <div className="space-y-3.5">
+                <div className="flex items-center gap-2 border-b border-slate-200/60 pb-2">
+                  <TrendingUp className="h-4 w-4 text-amber-600" />
+                  <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wider">Formula Pengukuran</h3>
+                </div>
+
+                <div className="space-y-3 font-sans text-xs text-slate-600 leading-relaxed">
+                  <p>
+                    Sebagai mitra pelayan unit sedia operasional Uniquip, setiap keluhan unit (SR baru) yang masuk harus segera direspon dan dieksekusi perbaikan.
+                  </p>
+                  
+                  <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-3xs space-y-2">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">Kalkulasi Mandiri</span>
+                    <p className="text-[11px] font-medium mt-1 leading-normal text-slate-700">
+                      Rasio keaktifan dihitung dari:
+                    </p>
+                    <div className="bg-slate-50 py-2 px-2.5 rounded border border-slate-100 text-center font-mono text-[10.5px] font-bold text-blue-800 block leading-normal">
+                      (Unit Sedang Diperbaiki ÷ Total SR Belum RFU) × 100%
+                    </div>
+                  </div>
+
+                  <p className="text-[10px] text-slate-405 italic font-medium leading-relaxed">
+                    *Tingkat keaktifan yang makin tinggi menandakan tim lapangan cepat memproses keluhan antrean perbaikan unit tanpa delay lama.
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-amber-50/70 border border-amber-100 p-3.5 rounded-xl text-[10px] text-amber-900 leading-relaxed font-sans mt-2">
+                <div className="font-bold flex items-center gap-1 mb-1 text-amber-900 uppercase tracking-wider text-[8.5px]">
+                  <Wrench className="h-3.5 w-3.5 text-amber-600" />
+                  Komitmen Uniquip Palangkaraya
+                </div>
+                Menjamin ketersediaan mekanik siaga sedia operasi untuk menurunkan angka list SR yang terkatung-katung lama di lapangan kerja Kalimantan Tengah.
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        {/* Mechanic ST KPI and Weekdays Achievement Section */}
+        <div id="section-mechanic-st-kpi">
+          <MechanicKpiDashboard srRecords={records} />
+        </div>
+
       </main>
 
       {/* Floating Modals and Side Slidover Timelines */}
@@ -2611,7 +2716,7 @@ export default function App() {
       {/* Aesthetic visually humble and authentic copyright footer */}
       <footer className="mt-auto max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 pt-8 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4 text-slate-400 text-xs text-center sm:text-left">
         <p className="font-sans">
-          &copy; 2026 Heavy Equipment Service Tracker Dashboard KalTeng. Hak Cipta Dilindungi.
+          &copy; 2026 Uniquip Cabang Palangkaraya — Heavy Equipment Service Tracker KalTeng. Hak Cipta Dilindungi.
         </p>
         <p className="font-mono text-[10px]">
           UTC Time: 2026-05-25 • Google Sheet Connected via Apps Script API
